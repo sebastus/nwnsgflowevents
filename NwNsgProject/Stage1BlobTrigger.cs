@@ -13,7 +13,7 @@ namespace NwNsgProject
 
         [FunctionName("stage1BlobTrigger")]
         public static void Run(
-            [BlobTrigger("insights-logs-networksecuritygroupflowevent/resourceId=/SUBSCRIPTIONS/{subId}/RESOURCEGROUPS/{resourceGroup}/PROVIDERS/MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/{nsgName}/y={blobYear}/m={blobMonth}/d={blobDay}/h={blobHour}/m={blobMinute}/macAddress={mac}/PT1H.json", Connection = "testAccountTF")]CloudBlockBlob myBlob,
+            [BlobTrigger("insights-logs-networksecuritygroupflowevent/resourceId=/SUBSCRIPTIONS/{subId}/RESOURCEGROUPS/{resourceGroup}/PROVIDERS/MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/{nsgName}/y={blobYear}/m={blobMonth}/d={blobDay}/h={blobHour}/m={blobMinute}/macAddress={mac}/PT1H.json", Connection = "testAccountScale")]CloudBlockBlob myBlob,
             [Queue("stage1", Connection = "AzureWebJobsStorage")] ICollector<Chunk> outputChunks,
             [Table("checkpoints", Connection = "AzureWebJobsStorage")] CloudTable checkpointTable,
             string subId, string resourceGroup, string nsgName, string blobYear, string blobMonth, string blobDay, string blobHour, string blobMinute, string mac,

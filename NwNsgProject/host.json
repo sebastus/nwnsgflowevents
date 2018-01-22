@@ -1,4 +1,5 @@
 {
+  "functions": [ "Stage1BlobTrigger", "Stage2QueueTrigger", "Stage3QueueTrigger" ],
   "queues": {
     "maxPollingInterval": 2000,
     "visibilityTimeout": "00:00:30",

@@ -18,7 +18,7 @@ namespace NwNsgProject
         public static async Task Run(
             [QueueTrigger("stage2", Connection = "AzureWebJobsStorage")]Chunk inputChunk,
             Binder binder, 
-            Binder logTransmissions,
+            Binder cefLog,
             TraceWriter log)
         {
 //            log.Info($"C# Queue trigger function processed: {inputChunk}");
@@ -58,6 +58,8 @@ namespace NwNsgProject
             newClientContent += "]}";
 
             await SendMessagesDownstream(newClientContent, log);
+
+            await CEFLog(newClientContent, cefLog, log);
         }
 
         public static async Task SendMessagesDownstream(string myMessages, TraceWriter log)
@@ -65,7 +67,7 @@ namespace NwNsgProject
             string outputBinding = Util.GetEnvironmentVariable("outputBinding");
             if (outputBinding.Length == 0)
             {
-                log.Error("Value for outputBinding is required. Permitted values are: 'logstash'.");
+                log.Error("Value for outputBinding is required. Permitted values are: 'logstash', 'arcsight'.");
                 return;
             }
 
@@ -78,6 +80,42 @@ namespace NwNsgProject
                     await obArcsight(myMessages, log);
                     break;
             }
+        }
+        static async Task CEFLog(string newClientContent, Binder cefLog, TraceWriter log)
+        {
+            int count = 0;
+            Byte[] transmission = new Byte[] { };
+
+            foreach (var message in convertToCEF(newClientContent, log))
+            {
+
+                try
+                {
+                    transmission = AppendToTransmission(transmission, message);
+
+                    // batch up the messages
+                    if (count++ == 1000)
+                    {
+                        Guid guid = Guid.NewGuid();
+                        var attributes = new Attribute[]
+                        {
+                            new BlobAttribute(String.Format("ceflog/{0}", guid)),
+                            new StorageAccountAttribute("AzureWebJobsStorage")
+                        };
+
+                        CloudBlockBlob blob = await cefLog.BindAsync<CloudBlockBlob>(attributes);
+                        await blob.UploadFromByteArrayAsync(transmission, 0, transmission.Length);
+
+                        count = 0;
+                        transmission = new Byte[] { };
+                    }
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"Exception logging CEF output: {ex.Message}");
+                }
+            }
+
         }
 
         static async Task obArcsight(string newClientContent, TraceWriter log)
@@ -254,13 +292,14 @@ namespace NwNsgProject
                 cefRecordBase += "|" + record.properties.Version.ToString("0.0");
                 cefRecordBase += "|" + record.category;
                 cefRecordBase += "|" + record.operationName;
-                cefRecordBase += "|0";  // severity is always 0
+                cefRecordBase += "|1";  // severity is always 1
                 cefRecordBase += "|deviceExternalId=" + record.MakeDeviceExternalID();
 
                 string cefOuterFlowRecord = cefRecordBase;
+                int count = 1;
                 foreach (var outerFlows in record.properties.flows)
                 {
-                    cefOuterFlowRecord += " cs1=" + outerFlows.rule;
+                    cefOuterFlowRecord += String.Format(" cs{0}=", count++) + outerFlows.rule;
 
                     string cefInnerFlowRecord = cefOuterFlowRecord;
                     foreach (var innerFlows in outerFlows.flows)

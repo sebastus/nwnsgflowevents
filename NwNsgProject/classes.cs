@@ -36,12 +36,12 @@ class NSGFlowLogTuple
     public override string ToString()
     {
         string temp = "";
-        temp += "startTime=" + startTime;
+        temp += "rt=" + startTime;
         temp += " src=" + sourceAddress;
         temp += " dst=" + destinationAddress;
         temp += " spt=" + sourcePort;
         temp += " dpt=" + destinationPort;
-        temp += " proto=" + transportProtocol;
+        temp += " proto=" + (transportProtocol == "U" ? "UDP" : "TCP");
         temp += " deviceDirection=" + (deviceDirection == "I" ? "0" : "1");
         temp += " act=" + deviceAction;
 

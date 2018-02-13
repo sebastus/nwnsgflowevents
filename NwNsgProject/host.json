@@ -1,10 +1,3 @@
 {
-  "functions": [ "Stage1BlobTrigger" ],
-  "queues": {
-    "maxPollingInterval": 2000,
-    "visibilityTimeout": "00:00:30",
-    "batchSize": 16,
-    "maxDequeueCount": 5,
-    "newBatchThreshold": 100
-  }
+  "functions": [ "stage1BlobTrigger", "Stage2QueueTrigger", "Stage3QueueTrigger" ]
 }

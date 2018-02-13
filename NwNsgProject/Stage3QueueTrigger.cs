@@ -100,7 +100,7 @@ namespace NwNsgProject
                         var attributes = new Attribute[]
                         {
                             new BlobAttribute(String.Format("ceflog/{0}", guid)),
-                            new StorageAccountAttribute("AzureWebJobsStorage")
+                            new StorageAccountAttribute("cefLogAccount")
                         };
 
                         CloudBlockBlob blob = await cefLog.BindAsync<CloudBlockBlob>(attributes);

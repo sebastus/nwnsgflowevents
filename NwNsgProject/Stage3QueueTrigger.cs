@@ -299,7 +299,8 @@ namespace NwNsgProject
                 int count = 1;
                 foreach (var outerFlows in record.properties.flows)
                 {
-                    cefOuterFlowRecord += String.Format(" cs{0}=", count++) + outerFlows.rule;
+                    cefOuterFlowRecord += String.Format(" cs{0}=", count++) + outerFlows.rule; 
+                    cefOuterFlowRecord += String.Format(" cs{0}Label=NSGRuleName", count++); 
 
                     string cefInnerFlowRecord = cefOuterFlowRecord;
                     foreach (var innerFlows in outerFlows.flows)

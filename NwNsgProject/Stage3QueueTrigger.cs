@@ -58,12 +58,12 @@ namespace NwNsgProject
             newClientContent += trimmedMessages.Substring(curlyBrace);
             newClientContent += "]}";
 
-            await SendMessagesDownstream(newClientContent, errorRecordBinder, log);
+            await SendMessagesDownstream(newClientContent, log);
 
-            await CEFLog(newClientContent, cefLogBinder, log);
+            await CEFLog(newClientContent, cefLogBinder, errorRecordBinder, log);
         }
 
-        public static async Task SendMessagesDownstream(string myMessages, Binder errorRecordBinder, TraceWriter log)
+        public static async Task SendMessagesDownstream(string myMessages, TraceWriter log)
         {
             string outputBinding = Util.GetEnvironmentVariable("outputBinding");
             if (outputBinding.Length == 0)
@@ -78,16 +78,17 @@ namespace NwNsgProject
                     await obLogstash(myMessages, log);
                     break;
                 case "arcsight":
-                    await obArcsight(myMessages, errorRecordBinder, log);
+                    await obArcsight(myMessages, log);
                     break;
             }
         }
-        static async Task CEFLog(string newClientContent, Binder cefLog, TraceWriter log)
+
+        static async Task CEFLog(string newClientContent, Binder cefLogBinder, Binder errorRecordBinder, TraceWriter log)
         {
             int count = 0;
             Byte[] transmission = new Byte[] { };
 
-            foreach (var message in convertToCEF(newClientContent, null, log))
+            foreach (var message in convertToCEF(newClientContent, errorRecordBinder, log))
             {
 
                 try
@@ -104,7 +105,7 @@ namespace NwNsgProject
                             new StorageAccountAttribute("cefLogAccount")
                         };
 
-                        CloudBlockBlob blob = await cefLog.BindAsync<CloudBlockBlob>(attributes);
+                        CloudBlockBlob blob = await cefLogBinder.BindAsync<CloudBlockBlob>(attributes);
                         await blob.UploadFromByteArrayAsync(transmission, 0, transmission.Length);
 
                         count = 0;
@@ -116,9 +117,135 @@ namespace NwNsgProject
                     log.Error($"Exception logging CEF output: {ex.Message}");
                 }
             }
+
+            if (count != 0)
+            {
+                Guid guid = Guid.NewGuid();
+                var attributes = new Attribute[]
+                {
+                    new BlobAttribute(String.Format("ceflog/{0}", guid)),
+                    new StorageAccountAttribute("cefLogAccount")
+                };
+
+                CloudBlockBlob blob = await cefLogBinder.BindAsync<CloudBlockBlob>(attributes);
+                await blob.UploadFromByteArrayAsync(transmission, 0, transmission.Length);
+            }
         }
 
-        static async Task obArcsight(string newClientContent, Binder errorRecordBinder, TraceWriter log)
+        static System.Collections.Generic.IEnumerable<string> convertToCEF(string newClientContent, Binder errorRecordBinder, TraceWriter log)
+        {
+            // newClientContent is a json string with records
+
+            NSGFlowLogRecords logs = JsonConvert.DeserializeObject<NSGFlowLogRecords>(newClientContent);
+
+            string cefRecordBase = "";
+            foreach (var record in logs.records)
+            {
+                cefRecordBase += record.MakeCEFTime();
+                cefRecordBase += "|Microsoft.Network";
+                cefRecordBase += "|NETWORKSECURITYGROUPS";
+                cefRecordBase += "|" + record.properties.Version.ToString("0.0");
+                cefRecordBase += "|" + record.category;
+                cefRecordBase += "|" + record.operationName;
+                cefRecordBase += "|1";  // severity is always 1
+                cefRecordBase += "|deviceExternalId=" + record.MakeDeviceExternalID();
+
+                string cefOuterFlowRecord = cefRecordBase;
+                string stringToYield = "";
+                var nothingWasWrittenOut = true;
+                int count = 1;
+                foreach (var outerFlows in record.properties.flows)
+                {
+                    var thereWasAnErrorInTheRecord = false;
+                    try
+                    {
+                        cefOuterFlowRecord += String.Format(" cs{0}=", count) + outerFlows.rule;
+                        cefOuterFlowRecord += String.Format(" cs{0}Label=NSGRuleName", count++);
+                    }
+                    catch (Exception ex)
+                    {
+                        cefOuterFlowRecord += String.Format("ERROR: {0}", ex.Message);
+                        thereWasAnErrorInTheRecord = true;
+                    }
+
+                    stringToYield = cefOuterFlowRecord;
+                    foreach (var innerFlows in outerFlows.flows)
+                    {
+                        try
+                        {
+                            var firstFlowTuple = new NSGFlowLogTuple(innerFlows.flowTuples[0]);
+                            stringToYield += (firstFlowTuple.GetDirection == "I" ? " dmac=" : " smac=") + innerFlows.MakeMAC();
+                        }
+                        catch (Exception ex)
+                        {
+                            stringToYield += String.Format("ERROR: {0}", ex.Message);
+                            thereWasAnErrorInTheRecord = true;
+                        }
+
+                        foreach (var flowTuple in innerFlows.flowTuples)
+                        {
+                            string tupleString = "";
+                            try
+                            {
+                                var tuple = new NSGFlowLogTuple(flowTuple);
+                                tupleString = tuple.ToString();
+                            }
+                            catch (Exception ex)
+                            {
+                                tupleString = String.Format("ERROR: {0}", ex.Message);
+                                thereWasAnErrorInTheRecord = true;
+                            }
+
+                            stringToYield += " " + tupleString;
+                            nothingWasWrittenOut = false;
+                            yield return stringToYield;
+
+                            if (thereWasAnErrorInTheRecord)
+                            {
+                                logErrorRecord(record, errorRecordBinder, log).Wait();
+                            }
+                        }
+                    }
+                }
+
+                if (nothingWasWrittenOut)
+                {
+                    logErrorRecord(record, errorRecordBinder, log).Wait();
+                    log.Error($"Wrote out an error record.");
+                    yield return stringToYield;
+                }
+            }
+        }
+
+        static async Task logErrorRecord(NSGFlowLogRecord errorRecord, Binder errorRecordBinder, TraceWriter log)
+        {
+            if (errorRecordBinder == null) { return; }
+
+            Byte[] transmission = new Byte[] { };
+
+            try
+            {
+                transmission = AppendToTransmission(transmission, errorRecord.ToString());
+
+                Guid guid = Guid.NewGuid();
+                var attributes = new Attribute[]
+                {
+                    new BlobAttribute(String.Format("errorRecord/{0}", guid)),
+                    new StorageAccountAttribute("cefLogAccount")
+                };
+
+                CloudBlockBlob blob = await errorRecordBinder.BindAsync<CloudBlockBlob>(attributes);
+                blob.UploadFromByteArray(transmission, 0, transmission.Length);
+
+                transmission = new Byte[] { };
+            }
+            catch (Exception ex)
+            {
+                log.Error($"Exception logging record: {ex.Message}");
+            }
+        }
+
+        static async Task obArcsight(string newClientContent, TraceWriter log)
         {
             string arcsightAddress = Util.GetEnvironmentVariable("arcsightAddress");
             string arcsightPort = Util.GetEnvironmentVariable("arcsightPort");
@@ -134,7 +261,7 @@ namespace NwNsgProject
 
             int count = 0;
             Byte[] transmission = new Byte[] { };
-            foreach (var message in convertToCEF(newClientContent, errorRecordBinder, log))
+            foreach (var message in convertToCEF(newClientContent, null, log))
             {
 
                 try
@@ -275,105 +402,6 @@ namespace NwNsgProject
                 log.Error($"Unknown error caught while sending to Logstash: \"{f.ToString()}\"");
                 throw f;
             }
-        }
-
-        static async Task logErrorRecord(NSGFlowLogRecord errorRecord, Binder errorRecordBinder, TraceWriter log)
-        {
-            if (errorRecordBinder == null) { return; }
-
-            Byte[] transmission = new Byte[] { };
-
-            try
-            {
-                transmission = AppendToTransmission(transmission, errorRecord.ToString());
-
-                Guid guid = Guid.NewGuid();
-                var attributes = new Attribute[]
-                {
-                    new BlobAttribute(String.Format("errorRecord/{0}", guid)),
-                    new StorageAccountAttribute("cefLogAccount")
-                };
-
-                CloudBlockBlob blob = await errorRecordBinder.BindAsync<CloudBlockBlob>(attributes);
-                blob.UploadFromByteArray(transmission, 0, transmission.Length);
-
-                transmission = new Byte[] { };
-            }
-            catch (Exception ex)
-            {
-                log.Error($"Exception logging record: {ex.Message}");
-            }
-        }
-
-        static System.Collections.Generic.IEnumerable<string> convertToCEF(string newClientContent, Binder errorRecordBinder, TraceWriter log)
-        {
-            // newClientContent is a json string with records
-
-            NSGFlowLogRecords logs = JsonConvert.DeserializeObject<NSGFlowLogRecords>(newClientContent);
-
-            string cefRecordBase = "";
-            foreach (var record in logs.records)
-            {
-                cefRecordBase += record.MakeCEFTime();
-                cefRecordBase += "|Microsoft.Network";
-                cefRecordBase += "|NETWORKSECURITYGROUPS";
-                cefRecordBase += "|" + record.properties.Version.ToString("0.0");
-                cefRecordBase += "|" + record.category;
-                cefRecordBase += "|" + record.operationName;
-                cefRecordBase += "|1";  // severity is always 1
-                cefRecordBase += "|deviceExternalId=" + record.MakeDeviceExternalID();
-
-                string cefOuterFlowRecord = cefRecordBase;
-                int count = 1;
-                foreach (var outerFlows in record.properties.flows)
-                {
-                    var thereWasAnErrorInTheRecord = false;
-                    try
-                    {
-                        cefOuterFlowRecord += String.Format(" cs{0}=", count) + outerFlows.rule;
-                        cefOuterFlowRecord += String.Format(" cs{0}Label=NSGRuleName", count++);
-                    } catch (Exception ex)
-                    {
-                        cefOuterFlowRecord += String.Format("ERROR: {0}", ex.Message);
-                        thereWasAnErrorInTheRecord = true;
-                    }
-
-                    string cefInnerFlowRecord = cefOuterFlowRecord;
-                    foreach (var innerFlows in outerFlows.flows)
-                    {
-                        try
-                        {
-                            var firstFlowTuple = new NSGFlowLogTuple(innerFlows.flowTuples[0]);
-                            cefInnerFlowRecord += (firstFlowTuple.GetDirection == "I" ? " dmac=" : " smac=") + innerFlows.MakeMAC();
-                        } catch (Exception ex)
-                        {
-                            cefInnerFlowRecord += String.Format("ERROR: {0}", ex.Message);
-                            thereWasAnErrorInTheRecord = true;
-                        }
-
-                        foreach (var flowTuple in innerFlows.flowTuples)
-                        {
-                            string tupleString = "";
-                            try
-                            {
-                                var tuple = new NSGFlowLogTuple(flowTuple);
-                                tupleString = tuple.ToString();
-                            } catch (Exception ex)
-                            {
-                                tupleString = String.Format("ERROR: {0}", ex.Message);
-                                thereWasAnErrorInTheRecord = true;
-                            }
-
-                            yield return cefInnerFlowRecord + " " + tupleString;
-
-                            if (thereWasAnErrorInTheRecord)
-                            {
-                                logErrorRecord(record, errorRecordBinder, log).Wait();
-                            }
-                        }
-                    }
-                }                
-            }
-        }
+        }        
     }
 }

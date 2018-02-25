@@ -119,6 +119,12 @@ class NSGFlowLogRecord
 
         return newTime + " host CEF:0";
     }
+
+    public override string ToString()
+    {
+        string temp = MakeDeviceExternalID();
+        return temp;
+    }
 }
 
 class NSGFlowLogRecords

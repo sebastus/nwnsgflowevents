@@ -18,7 +18,8 @@ namespace NwNsgProject
         public static async Task Run(
             [QueueTrigger("stage2", Connection = "AzureWebJobsStorage")]Chunk inputChunk,
             Binder binder, 
-            Binder cefLog,
+            Binder cefLogBinder,
+            Binder errorRecordBinder,
             TraceWriter log)
         {
 //            log.Info($"C# Queue trigger function processed: {inputChunk}");
@@ -57,12 +58,12 @@ namespace NwNsgProject
             newClientContent += trimmedMessages.Substring(curlyBrace);
             newClientContent += "]}";
 
-            await SendMessagesDownstream(newClientContent, log);
+            await SendMessagesDownstream(newClientContent, errorRecordBinder, log);
 
-            await CEFLog(newClientContent, cefLog, log);
+            await CEFLog(newClientContent, cefLogBinder, log);
         }
 
-        public static async Task SendMessagesDownstream(string myMessages, TraceWriter log)
+        public static async Task SendMessagesDownstream(string myMessages, Binder errorRecordBinder, TraceWriter log)
         {
             string outputBinding = Util.GetEnvironmentVariable("outputBinding");
             if (outputBinding.Length == 0)
@@ -77,7 +78,7 @@ namespace NwNsgProject
                     await obLogstash(myMessages, log);
                     break;
                 case "arcsight":
-                    await obArcsight(myMessages, log);
+                    await obArcsight(myMessages, errorRecordBinder, log);
                     break;
             }
         }
@@ -86,7 +87,7 @@ namespace NwNsgProject
             int count = 0;
             Byte[] transmission = new Byte[] { };
 
-            foreach (var message in convertToCEF(newClientContent, log))
+            foreach (var message in convertToCEF(newClientContent, null, log))
             {
 
                 try
@@ -115,10 +116,9 @@ namespace NwNsgProject
                     log.Error($"Exception logging CEF output: {ex.Message}");
                 }
             }
-
         }
 
-        static async Task obArcsight(string newClientContent, TraceWriter log)
+        static async Task obArcsight(string newClientContent, Binder errorRecordBinder, TraceWriter log)
         {
             string arcsightAddress = Util.GetEnvironmentVariable("arcsightAddress");
             string arcsightPort = Util.GetEnvironmentVariable("arcsightPort");
@@ -134,7 +134,7 @@ namespace NwNsgProject
 
             int count = 0;
             Byte[] transmission = new Byte[] { };
-            foreach (var message in convertToCEF(newClientContent, log))
+            foreach (var message in convertToCEF(newClientContent, errorRecordBinder, log))
             {
 
                 try
@@ -277,7 +277,35 @@ namespace NwNsgProject
             }
         }
 
-        static System.Collections.Generic.IEnumerable<string> convertToCEF(string newClientContent, TraceWriter log)
+        static async Task logErrorRecord(NSGFlowLogRecord errorRecord, Binder errorRecordBinder, TraceWriter log)
+        {
+            if (errorRecordBinder == null) { return; }
+
+            Byte[] transmission = new Byte[] { };
+
+            try
+            {
+                transmission = AppendToTransmission(transmission, errorRecord.ToString());
+
+                Guid guid = Guid.NewGuid();
+                var attributes = new Attribute[]
+                {
+                    new BlobAttribute(String.Format("errorRecord/{0}", guid)),
+                    new StorageAccountAttribute("cefLogAccount")
+                };
+
+                CloudBlockBlob blob = await errorRecordBinder.BindAsync<CloudBlockBlob>(attributes);
+                blob.UploadFromByteArray(transmission, 0, transmission.Length);
+
+                transmission = new Byte[] { };
+            }
+            catch (Exception ex)
+            {
+                log.Error($"Exception logging record: {ex.Message}");
+            }
+        }
+
+        static System.Collections.Generic.IEnumerable<string> convertToCEF(string newClientContent, Binder errorRecordBinder, TraceWriter log)
         {
             // newClientContent is a json string with records
 
@@ -299,22 +327,52 @@ namespace NwNsgProject
                 int count = 1;
                 foreach (var outerFlows in record.properties.flows)
                 {
-                    cefOuterFlowRecord += String.Format(" cs{0}=", count++) + outerFlows.rule; 
-                    cefOuterFlowRecord += String.Format(" cs{0}Label=NSGRuleName", count++); 
+                    var thereWasAnErrorInTheRecord = false;
+                    try
+                    {
+                        cefOuterFlowRecord += String.Format(" cs{0}=", count) + outerFlows.rule;
+                        cefOuterFlowRecord += String.Format(" cs{0}Label=NSGRuleName", count++);
+                    } catch (Exception ex)
+                    {
+                        cefOuterFlowRecord += String.Format("ERROR: {0}", ex.Message);
+                        thereWasAnErrorInTheRecord = true;
+                    }
 
                     string cefInnerFlowRecord = cefOuterFlowRecord;
                     foreach (var innerFlows in outerFlows.flows)
                     {
-                        var firstFlowTuple = new NSGFlowLogTuple(innerFlows.flowTuples[0]);
-                        cefInnerFlowRecord += (firstFlowTuple.GetDirection == "I" ? " dmac=" : " smac=") + innerFlows.MakeMAC();
+                        try
+                        {
+                            var firstFlowTuple = new NSGFlowLogTuple(innerFlows.flowTuples[0]);
+                            cefInnerFlowRecord += (firstFlowTuple.GetDirection == "I" ? " dmac=" : " smac=") + innerFlows.MakeMAC();
+                        } catch (Exception ex)
+                        {
+                            cefInnerFlowRecord += String.Format("ERROR: {0}", ex.Message);
+                            thereWasAnErrorInTheRecord = true;
+                        }
 
                         foreach (var flowTuple in innerFlows.flowTuples)
                         {
-                            var tuple = new NSGFlowLogTuple(flowTuple);
-                            yield return cefInnerFlowRecord + " " + tuple.ToString();
+                            string tupleString = "";
+                            try
+                            {
+                                var tuple = new NSGFlowLogTuple(flowTuple);
+                                tupleString = tuple.ToString();
+                            } catch (Exception ex)
+                            {
+                                tupleString = String.Format("ERROR: {0}", ex.Message);
+                                thereWasAnErrorInTheRecord = true;
+                            }
+
+                            yield return cefInnerFlowRecord + " " + tupleString;
+
+                            if (thereWasAnErrorInTheRecord)
+                            {
+                                logErrorRecord(record, errorRecordBinder, log).Wait();
+                            }
                         }
                     }
-                }
+                }                
             }
         }
     }
